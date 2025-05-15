@@ -101,7 +101,7 @@ def connect_and_listen(node_list, listen_duration=300):
             print(f"Successfully connected to {ip}, listening for up to {listen_duration} seconds")
             start_time = time.time()
             def read_message(sock):
-                sock.settimeout(10)
+                sock.settimeout(30)
                 header = sock.recv(24)
                 if len(header) < 24:
                     raise Exception("Incomplete header")
@@ -117,23 +117,48 @@ def connect_and_listen(node_list, listen_duration=300):
 
             try:
                 while time.time() - start_time < listen_duration:
-                    command, payload = read_message(sock)
-                    if command == "inv":
-                        count = payload[0]
-                        print(f"Received 'inv' with {count} item(s)")
-                        offset = 1
-                        for _ in range(count):
-                            if offset + 36 > len(payload):
-                                print("Truncated inv message")
-                                break
-                            inv_type = struct.unpack('<I', payload[offset:offset+4])[0]
-                            hash_hex = payload[offset+4:offset+36][::-1].hex()
-                            offset += 36
-                            if inv_type == 2:
-                                print(f"New block announced with hash: {hash_hex}")
-                        return  # Exit after getting a valid inv
-            except Exception as e:
-                print(f"Error during listen on {ip}: {e}")
+                    try:
+                        command, payload = read_message(sock)
+                        if command == "inv":
+                            count = payload[0]
+                            print(f"Received 'inv' with {count} item(s)")
+                            offset = 1
+                            for _ in range(count):
+                                if offset + 36 > len(payload):
+                                    print("Truncated inv message")
+                                    break
+                                inv_type = struct.unpack('<I', payload[offset:offset+4])[0]
+                                hash_hex = payload[offset+4:offset+36][::-1].hex()
+                                offset += 36
+                                if inv_type == 2:
+                                    print(f"New block announced with hash: {hash_hex}")
+
+                                    # Construct and send getdata message
+                                    block_hash = bytes.fromhex(hash_hex)[::-1]
+                                    count_bytes = b'\x01'
+                                    inv_type_bytes = struct.pack('<I', 2)
+                                    getdata_payload = count_bytes + inv_type_bytes + block_hash
+
+                                    magic = b'\xf9\xbe\xb4\xd9'
+                                    cmd_bytes = b'getdata' + b'\x00' * (12 - len('getdata'))
+                                    length = struct.pack('<I', len(getdata_payload))
+                                    checksum = hashlib.sha256(hashlib.sha256(getdata_payload).digest()).digest()[:4]
+                                    message = magic + cmd_bytes + length + checksum + getdata_payload
+                                    sock.sendall(message)
+                                    print("Sent getdata request for block")
+
+                                    # Read block response
+                                    resp_command, resp_payload = read_message(sock)
+                                    if resp_command == "block":
+                                        print(f"Received block message with {len(resp_payload)} bytes")
+                                    else:
+                                        print(f"Unexpected response to getdata: {resp_command}")
+                                    return
+                    except socket.timeout:
+                        continue  # try again until total listen_duration is exceeded
+                    except Exception as e:
+                        print(f"Error reading from {ip}: {e}")
+                        break
             finally:
                 sock.close()
     print("No block announcements received from any nodes.")
