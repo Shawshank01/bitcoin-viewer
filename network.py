@@ -4,6 +4,22 @@ import struct
 import time
 import hashlib
 
+BLOCK_HEADER_SIZE = 80
+
+def read_varint(data, offset):
+    first = data[offset]
+    if first < 0xfd:
+        return first, offset + 1
+    elif first == 0xfd:
+        return struct.unpack('<H', data[offset+1:offset+3])[0], offset + 3
+    elif first == 0xfe:
+        return struct.unpack('<I', data[offset+1:offset+5])[0], offset + 5
+    else:
+        return struct.unpack('<Q', data[offset+1:offset+9])[0], offset + 9
+
+def read_bytes(data, offset, length):
+    return data[offset:offset+length], offset + length
+
 def get_bitcoin_nodes(seed="dnsseed.bluematt.me"):
     try:
         result = dns.resolver.resolve(seed, 'A')
@@ -93,15 +109,15 @@ def connect_and_handshake(ip, port=8333):
 
 
 # Connect to each node, handshake, and briefly listen for inv messages
-def connect_and_listen(node_list, listen_duration=300):
+def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minutes per node
     import time
     for ip in node_list:
         sock = connect_and_handshake(ip)
         if sock:
+            sock.settimeout(30)
             print(f"Successfully connected to {ip}, listening for up to {listen_duration} seconds")
             start_time = time.time()
             def read_message(sock):
-                sock.settimeout(30)
                 header = sock.recv(24)
                 if len(header) < 24:
                     raise Exception("Incomplete header")
@@ -151,6 +167,66 @@ def connect_and_listen(node_list, listen_duration=300):
                                     resp_command, resp_payload = read_message(sock)
                                     if resp_command == "block":
                                         print(f"Received block message with {len(resp_payload)} bytes")
+                                        if len(resp_payload) < BLOCK_HEADER_SIZE:
+                                            print("Block payload too short to contain a valid header")
+                                            return
+
+                                        # Parse block header (80 bytes)
+                                        header = resp_payload[:BLOCK_HEADER_SIZE]
+                                        version, prev_hash, merkle_root, timestamp, bits, nonce = struct.unpack('<I32s32sIII', header)
+
+                                        # Format timestamp
+                                        from datetime import datetime, timezone
+                                        block_time = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+
+                                        # Display parsed header info
+                                        print(f"Block Version: {version}")
+                                        print(f"Previous Block Hash: {prev_hash[::-1].hex()}")
+                                        print(f"Merkle Root: {merkle_root[::-1].hex()}")
+                                        print(f"Timestamp: {block_time} UTC")
+                                        print(f"Bits: {bits}")
+                                        print(f"Nonce: {nonce}")
+                                        # Parse transaction count (VarInt)
+                                        tx_count, tx_offset = read_varint(resp_payload, BLOCK_HEADER_SIZE)
+                                        print(f"Transaction Count: {tx_count}")
+
+                                        current_offset = tx_offset
+
+                                        MAX_PRINTED_TX = 10
+                                        parsed_transactions = []
+
+                                        for tx_index in range(tx_count):
+                                            try:
+                                                # Version
+                                                _, current_offset = read_bytes(resp_payload, current_offset, 4)
+
+                                                # Input count
+                                                in_count, current_offset = read_varint(resp_payload, current_offset)
+                                                for _ in range(in_count):
+                                                    _, current_offset = read_bytes(resp_payload, current_offset, 36)  # prev txid + index
+                                                    script_len, current_offset = read_varint(resp_payload, current_offset)
+                                                    _, current_offset = read_bytes(resp_payload, current_offset, script_len + 4)  # script + sequence
+
+                                                # Output count
+                                                out_count, current_offset = read_varint(resp_payload, current_offset)
+                                                total_output = 0
+                                                for _ in range(out_count):
+                                                    value_bytes, current_offset = read_bytes(resp_payload, current_offset, 8)
+                                                    value = struct.unpack('<Q', value_bytes)[0]
+                                                    total_output += value
+                                                    script_len, current_offset = read_varint(resp_payload, current_offset)
+                                                    _, current_offset = read_bytes(resp_payload, current_offset, script_len)
+
+                                                # Lock time
+                                                _, current_offset = read_bytes(resp_payload, current_offset, 4)
+
+                                                parsed_transactions.append((tx_index + 1, total_output / 1e8))
+                                            except Exception as e:
+                                                print(f"Error parsing transaction {tx_index+1}: {e}")
+                                                break
+                                        print(f"Displaying last {MAX_PRINTED_TX} transactions:")
+                                        for tx_num, btc_value in parsed_transactions[-MAX_PRINTED_TX:]:
+                                            print(f"Transaction {tx_num}: {btc_value:.8f} BTC")
                                     else:
                                         print(f"Unexpected response to getdata: {resp_command}")
                                     return

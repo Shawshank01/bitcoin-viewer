@@ -7,6 +7,6 @@ if __name__ == "__main__":
     print("Found nodes:", nodes)
 
     if nodes:
-        connect_and_listen(nodes, listen_duration=900)  # listen up to 15 minutes per node
+        connect_and_listen(nodes)
     else:
         print("No nodes available.")
