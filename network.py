@@ -111,6 +111,7 @@ def connect_and_handshake(ip, port=8333):
 # Connect to each node, handshake, and briefly listen for inv messages
 def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minutes per node
     import time
+    import hashlib
     for ip in node_list:
         sock = connect_and_handshake(ip)
         if sock:
@@ -197,6 +198,8 @@ def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minute
 
                                         for tx_index in range(tx_count):
                                             try:
+                                                tx_start = current_offset  # Mark the start of this transaction
+
                                                 # Version
                                                 _, current_offset = read_bytes(resp_payload, current_offset, 4)
 
@@ -220,13 +223,17 @@ def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minute
                                                 # Lock time
                                                 _, current_offset = read_bytes(resp_payload, current_offset, 4)
 
-                                                parsed_transactions.append((tx_index + 1, total_output / 1e8))
+                                                tx_end = current_offset
+                                                tx_raw = resp_payload[tx_start:tx_end]
+                                                txid = hashlib.sha256(hashlib.sha256(tx_raw).digest()).digest()[::-1].hex()
+
+                                                parsed_transactions.append((tx_index + 1, total_output / 1e8, txid))
                                             except Exception as e:
                                                 print(f"Error parsing transaction {tx_index+1}: {e}")
                                                 break
                                         print(f"Displaying last {MAX_PRINTED_TX} transactions:")
-                                        for tx_num, btc_value in parsed_transactions[-MAX_PRINTED_TX:]:
-                                            print(f"Transaction {tx_num}: {btc_value:.8f} BTC")
+                                        for tx_num, btc_value, txid in parsed_transactions[-MAX_PRINTED_TX:]:
+                                            print(f"Transaction {tx_num}: {btc_value:.8f} BTC | TXID: {txid}")
                                     else:
                                         print(f"Unexpected response to getdata: {resp_command}")
                                     return
