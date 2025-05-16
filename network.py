@@ -1,3 +1,5 @@
+# Bitcoin P2P network communication module
+
 import dns.resolver
 import socket
 import struct
@@ -6,7 +8,7 @@ from utils import (
     double_sha256, format_timestamp, reverse_bytes,
     MAGIC_NUMBER, DEFAULT_PORT, BLOCK_HEADER_SIZE
 )
-from parser import parse_block, read_varint, read_bytes
+from parser import parse_block
 
 def get_bitcoin_nodes(seed="dnsseed.bluematt.me"):
     """Get list of Bitcoin nodes from DNS seed."""
@@ -18,23 +20,23 @@ def get_bitcoin_nodes(seed="dnsseed.bluematt.me"):
         return []
 
 def create_message(command, payload):
-    """Create a Bitcoin protocol message."""
+    """Create a Bitcoin protocol message with magic number, command, length, and checksum."""
     command_bytes = command.encode() + b'\x00' * (12 - len(command))
     length = struct.pack('<I', len(payload))
     checksum = double_sha256(payload)[:4]
     return MAGIC_NUMBER + command_bytes + length + checksum + payload
 
 def connect_and_handshake(ip, port=DEFAULT_PORT):
-    """Connect to a Bitcoin node and perform handshake."""
+    """Connect to a Bitcoin node and perform version/verack handshake."""
     try:
         print(f"Connecting to {ip}:{port}")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(10)
         s.connect((ip, port))
 
-        # Build version payload
-        version = 70015
-        services = 0
+        # Build version message payload
+        version = 70015  # Protocol version
+        services = 0     # Node services
         timestamp = int(time.time())
         addr_recv_services = 0
         addr_recv_ip = b"\x00" * 16
@@ -47,6 +49,7 @@ def connect_and_handshake(ip, port=DEFAULT_PORT):
         start_height = 0
         relay = 0
 
+        # Pack version message fields
         payload = struct.pack('<iQQ', version, services, timestamp)
         payload += struct.pack('>Q16sH', addr_recv_services, addr_recv_ip, addr_recv_port)
         payload += struct.pack('>Q16sH', addr_trans_services, addr_trans_ip, addr_trans_port)
@@ -59,6 +62,7 @@ def connect_and_handshake(ip, port=DEFAULT_PORT):
 
         # Read response from node
         def read_message(sock):
+            """Read a complete Bitcoin protocol message."""
             header = sock.recv(24)
             if len(header) < 24:
                 raise Exception("Incomplete header")
@@ -72,6 +76,7 @@ def connect_and_handshake(ip, port=DEFAULT_PORT):
                 payload += chunk
             return command, payload
 
+        # Wait for version and verack messages
         version_received = False
         verack_received = False
 
@@ -91,7 +96,7 @@ def connect_and_handshake(ip, port=DEFAULT_PORT):
         return None
 
 def connect_and_listen(node_list, listen_duration=900):
-    """Connect to nodes and listen for new blocks."""
+    """Connect to nodes and listen for new blocks for specified duration."""
     for ip in node_list:
         sock = connect_and_handshake(ip)
         if sock:
@@ -100,6 +105,7 @@ def connect_and_listen(node_list, listen_duration=900):
             start_time = time.time()
             
             def read_message(sock):
+                """Read a complete Bitcoin protocol message."""
                 header = sock.recv(24)
                 if len(header) < 24:
                     raise Exception("Incomplete header")
@@ -118,6 +124,7 @@ def connect_and_listen(node_list, listen_duration=900):
                     try:
                         command, payload = read_message(sock)
                         if command == "inv":
+                            # Process inventory message
                             count = payload[0]
                             print(f"Received 'inv' with {count} item(s)")
                             offset = 1
@@ -131,7 +138,7 @@ def connect_and_listen(node_list, listen_duration=900):
                                 if inv_type == 2:  # Block
                                     print(f"New block announced with hash: {hash_hex}")
                                     
-                                    # Request block data
+                                    # Request and process block data
                                     block_hash = bytes.fromhex(hash_hex)[::-1]
                                     getdata_payload = b'\x01' + struct.pack('<I', 2) + block_hash
                                     sock.sendall(create_message('getdata', getdata_payload))
@@ -153,7 +160,7 @@ def connect_and_listen(node_list, listen_duration=900):
                                                 print(f"Expected: {hash_hex}")
                                                 print(f"Computed: {computed_hash}")
 
-                                            # Display block info
+                                            # Display block information
                                             header = block_info['header']
                                             print(f"Block Version: {header['version']}")
                                             print(f"Previous Block Hash: {reverse_bytes(header['prev_hash']).hex()}")
@@ -163,7 +170,7 @@ def connect_and_listen(node_list, listen_duration=900):
                                             print(f"Nonce: {header['nonce']}")
                                             print(f"Transaction Count: {len(block_info['transactions'])}")
 
-                                            # Display transactions
+                                            # Display recent transactions
                                             MAX_PRINTED_TX = 10
                                             print(f"Displaying last {MAX_PRINTED_TX} transactions:")
                                             for tx in block_info['transactions'][-MAX_PRINTED_TX:]:
