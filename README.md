@@ -9,7 +9,7 @@ This project is a simplified Bitcoin blockchain viewer that connects directly to
 - Sends `getdata` requests to fetch full block details
 - Parses and displays:
   - Block version
-  - Block timestamp (human-readable UTC)
+  - Block timestamp (in UTC)
   - Previous block hash
   - Merkle root
   - Nonce and difficulty (bits)
@@ -17,7 +17,7 @@ This project is a simplified Bitcoin blockchain viewer that connects directly to
   - Last 10 transactions with BTC value and TXID
 - Verifies block hash from the block header
 - Modular parsing logic using `parser.py`
-- Automatic reconnection to different nodes if connection fails
+- Automatic reconnection to different nodes if connection fails (please be patient)
 
 ## Requirements
 
@@ -47,7 +47,7 @@ python main.py
 
 The script will:
 - Resolve Bitcoin node IPs from DNS seed
-- Connect to nodes in sequence (with 10-second connection timeout)
+- Connect to nodes in sequence
 - Listen for new blocks for 15 minutes (900 seconds) by default
 - Display each block's header and selected transactions when new blocks are mined
 - Automatically try the next node if connection fails
@@ -80,9 +80,7 @@ Transaction: [amount] BTC | TXID: [txid]
 - `parser.py`: Contains reusable functions to parse headers, transactions, and Bitcoin message components
 - `utils.py`: Helper functions for hashing, timestamp formatting, and unit conversion
 - `requirements.txt`: Project dependencies
-- `README.md`: Project documentation
 
 ## Dependencies
 
 - dnspython: For DNS resolution of Bitcoin nodes
-- (Other dependencies will be listed in requirements.txt)
