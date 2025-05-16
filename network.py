@@ -2,25 +2,14 @@ import dns.resolver
 import socket
 import struct
 import time
-import hashlib
-
-BLOCK_HEADER_SIZE = 80
-
-def read_varint(data, offset):
-    first = data[offset]
-    if first < 0xfd:
-        return first, offset + 1
-    elif first == 0xfd:
-        return struct.unpack('<H', data[offset+1:offset+3])[0], offset + 3
-    elif first == 0xfe:
-        return struct.unpack('<I', data[offset+1:offset+5])[0], offset + 5
-    else:
-        return struct.unpack('<Q', data[offset+1:offset+9])[0], offset + 9
-
-def read_bytes(data, offset, length):
-    return data[offset:offset+length], offset + length
+from utils import (
+    double_sha256, format_timestamp, reverse_bytes,
+    MAGIC_NUMBER, DEFAULT_PORT, BLOCK_HEADER_SIZE
+)
+from parser import parse_block, read_varint, read_bytes
 
 def get_bitcoin_nodes(seed="dnsseed.bluematt.me"):
+    """Get list of Bitcoin nodes from DNS seed."""
     try:
         result = dns.resolver.resolve(seed, 'A')
         return [ip.to_text() for ip in result]
@@ -28,7 +17,15 @@ def get_bitcoin_nodes(seed="dnsseed.bluematt.me"):
         print(f"DNS lookup failed: {e}")
         return []
 
-def connect_and_handshake(ip, port=8333):
+def create_message(command, payload):
+    """Create a Bitcoin protocol message."""
+    command_bytes = command.encode() + b'\x00' * (12 - len(command))
+    length = struct.pack('<I', len(payload))
+    checksum = double_sha256(payload)[:4]
+    return MAGIC_NUMBER + command_bytes + length + checksum + payload
+
+def connect_and_handshake(ip, port=DEFAULT_PORT):
+    """Connect to a Bitcoin node and perform handshake."""
     try:
         print(f"Connecting to {ip}:{port}")
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -41,10 +38,10 @@ def connect_and_handshake(ip, port=8333):
         timestamp = int(time.time())
         addr_recv_services = 0
         addr_recv_ip = b"\x00" * 16
-        addr_recv_port = 8333
+        addr_recv_port = port
         addr_trans_services = 0
         addr_trans_ip = b"\x00" * 16
-        addr_trans_port = 8333
+        addr_trans_port = port
         nonce = 0
         user_agent_bytes = b'\x00'
         start_height = 0
@@ -57,14 +54,7 @@ def connect_and_handshake(ip, port=8333):
         payload += user_agent_bytes
         payload += struct.pack('<i?', start_height, relay)
 
-        # Bitcoin message
-        magic = b'\xf9\xbe\xb4\xd9'
-        command = b'version' + b'\x00' * (12 - len('version'))
-        length = struct.pack('<I', len(payload))
-        checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
-        message = magic + command + length + checksum + payload
-
-        s.sendall(message)
+        s.sendall(create_message('version', payload))
         print("Sent version message")
 
         # Read response from node
@@ -93,31 +83,22 @@ def connect_and_handshake(ip, port=8333):
             elif command == "verack":
                 verack_received = True
 
-        # Send our verack
-        magic = b'\xf9\xbe\xb4\xd9'
-        command = b'verack' + b'\x00' * (12 - len('verack'))
-        payload = b''
-        length = struct.pack('<I', 0)
-        checksum = hashlib.sha256(hashlib.sha256(payload).digest()).digest()[:4]
-        message = magic + command + length + checksum + payload
-        s.sendall(message)
+        s.sendall(create_message('verack', b''))
         print("Sent verack — handshake complete")
         return s
     except Exception as e:
         print(f"Connection failed: {e}")
         return None
 
-
-# Connect to each node, handshake, and briefly listen for inv messages
-def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minutes per node
-    import time
-    import hashlib
+def connect_and_listen(node_list, listen_duration=900):
+    """Connect to nodes and listen for new blocks."""
     for ip in node_list:
         sock = connect_and_handshake(ip)
         if sock:
             sock.settimeout(30)
             print(f"Successfully connected to {ip}, listening for up to {listen_duration} seconds")
             start_time = time.time()
+            
             def read_message(sock):
                 header = sock.recv(24)
                 if len(header) < 24:
@@ -145,112 +126,56 @@ def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minute
                                     print("Truncated inv message")
                                     break
                                 inv_type = struct.unpack('<I', payload[offset:offset+4])[0]
-                                hash_hex = payload[offset+4:offset+36][::-1].hex()
+                                hash_hex = reverse_bytes(payload[offset+4:offset+36]).hex()
                                 offset += 36
-                                if inv_type == 2:
+                                if inv_type == 2:  # Block
                                     print(f"New block announced with hash: {hash_hex}")
-
-                                    # Construct and send getdata message
+                                    
+                                    # Request block data
                                     block_hash = bytes.fromhex(hash_hex)[::-1]
-                                    count_bytes = b'\x01'
-                                    inv_type_bytes = struct.pack('<I', 2)
-                                    getdata_payload = count_bytes + inv_type_bytes + block_hash
-
-                                    magic = b'\xf9\xbe\xb4\xd9'
-                                    cmd_bytes = b'getdata' + b'\x00' * (12 - len('getdata'))
-                                    length = struct.pack('<I', len(getdata_payload))
-                                    checksum = hashlib.sha256(hashlib.sha256(getdata_payload).digest()).digest()[:4]
-                                    message = magic + cmd_bytes + length + checksum + getdata_payload
-                                    sock.sendall(message)
+                                    getdata_payload = b'\x01' + struct.pack('<I', 2) + block_hash
+                                    sock.sendall(create_message('getdata', getdata_payload))
                                     print("Sent getdata request for block")
 
-                                    # Read block response
+                                    # Read and parse block
                                     resp_command, resp_payload = read_message(sock)
                                     if resp_command == "block":
                                         print(f"Received block message with {len(resp_payload)} bytes")
-                                        if len(resp_payload) < BLOCK_HEADER_SIZE:
-                                            print("Block payload too short to contain a valid header")
-                                            return
+                                        try:
+                                            block_info = parse_block(resp_payload)
+                                            
+                                            # Verify block hash
+                                            computed_hash = double_sha256(resp_payload[:BLOCK_HEADER_SIZE])[::-1].hex()
+                                            if computed_hash == hash_hex:
+                                                print(f"✔ Verified block hash: {computed_hash}")
+                                            else:
+                                                print(f"✘ Block hash mismatch!")
+                                                print(f"Expected: {hash_hex}")
+                                                print(f"Computed: {computed_hash}")
 
-                                        # Parse block header (80 bytes)
-                                        header = resp_payload[:BLOCK_HEADER_SIZE]
-                                        version, prev_hash, merkle_root, timestamp, bits, nonce = struct.unpack('<I32s32sIII', header)
+                                            # Display block info
+                                            header = block_info['header']
+                                            print(f"Block Version: {header['version']}")
+                                            print(f"Previous Block Hash: {reverse_bytes(header['prev_hash']).hex()}")
+                                            print(f"Merkle Root: {reverse_bytes(header['merkle_root']).hex()}")
+                                            print(f"Timestamp: {format_timestamp(header['timestamp'])} UTC")
+                                            print(f"Bits: {header['bits']}")
+                                            print(f"Nonce: {header['nonce']}")
+                                            print(f"Transaction Count: {len(block_info['transactions'])}")
 
-                                        # Compute and verify block hash
-                                        computed_hash = hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
-                                        if computed_hash == hash_hex:
-                                            print(f"✔ Verified block hash: {computed_hash}")
-                                        else:
-                                            print(f"✘ Block hash mismatch!")
-                                            print(f"Expected: {hash_hex}")
-                                            print(f"Computed: {computed_hash}")
-
-                                        # Format timestamp
-                                        from datetime import datetime, timezone
-                                        block_time = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-
-                                        # Display parsed header info
-                                        print(f"Block Version: {version}")
-                                        print(f"Previous Block Hash: {prev_hash[::-1].hex()}")
-                                        print(f"Merkle Root: {merkle_root[::-1].hex()}")
-                                        print(f"Timestamp: {block_time} UTC")
-                                        print(f"Bits: {bits}")
-                                        print(f"Nonce: {nonce}")
-                                        # Parse transaction count (VarInt)
-                                        tx_count, tx_offset = read_varint(resp_payload, BLOCK_HEADER_SIZE)
-                                        print(f"Transaction Count: {tx_count}")
-
-                                        current_offset = tx_offset
-
-                                        MAX_PRINTED_TX = 10
-                                        parsed_transactions = []
-
-                                        for tx_index in range(tx_count):
-                                            try:
-                                                tx_start = current_offset  # Mark the start of this transaction
-
-                                                # Version
-                                                _, current_offset = read_bytes(resp_payload, current_offset, 4)
-
-                                                # Input count
-                                                in_count, current_offset = read_varint(resp_payload, current_offset)
-                                                for _ in range(in_count):
-                                                    _, current_offset = read_bytes(resp_payload, current_offset, 36)  # prev txid + index
-                                                    script_len, current_offset = read_varint(resp_payload, current_offset)
-                                                    _, current_offset = read_bytes(resp_payload, current_offset, script_len + 4)  # script + sequence
-
-                                                # Output count
-                                                out_count, current_offset = read_varint(resp_payload, current_offset)
-                                                total_output = 0
-                                                for _ in range(out_count):
-                                                    value_bytes, current_offset = read_bytes(resp_payload, current_offset, 8)
-                                                    value = struct.unpack('<Q', value_bytes)[0]
-                                                    total_output += value
-                                                    script_len, current_offset = read_varint(resp_payload, current_offset)
-                                                    _, current_offset = read_bytes(resp_payload, current_offset, script_len)
-
-                                                # Lock time
-                                                _, current_offset = read_bytes(resp_payload, current_offset, 4)
-
-                                                tx_end = current_offset
-                                                tx_raw = resp_payload[tx_start:tx_end]
-                                                txid = hashlib.sha256(hashlib.sha256(tx_raw).digest()).digest()[::-1].hex()
-
-                                                parsed_transactions.append((tx_index + 1, total_output / 1e8, txid))
-                                            except Exception as e:
-                                                print(f"Error parsing transaction {tx_index+1}: {e}")
-                                                break
-                                        print(f"Displaying last {MAX_PRINTED_TX} transactions:")
-                                        for tx_num, btc_value, txid in parsed_transactions[-MAX_PRINTED_TX:]:
-                                            print(f"Transaction {tx_num}: {btc_value:.8f} BTC | TXID: {txid}")
+                                            # Display transactions
+                                            MAX_PRINTED_TX = 10
+                                            print(f"Displaying last {MAX_PRINTED_TX} transactions:")
+                                            for tx in block_info['transactions'][-MAX_PRINTED_TX:]:
+                                                print(f"Transaction: {tx['value']:.8f} BTC | TXID: {tx['txid']}")
+                                        except Exception as e:
+                                            print(f"Error parsing block: {e}")
                                     else:
                                         print(f"Unexpected response to getdata: {resp_command}")
                                     return
                     except socket.timeout:
-                        continue  # try again until total listen_duration is exceeded
-                    except Exception as e:
-                        print(f"Error reading from {ip}: {e}")
-                        break
+                        continue
+            except Exception as e:
+                print(f"Error during listening: {e}")
             finally:
                 sock.close()
-    print("No block announcements received from any nodes.")
