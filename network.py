@@ -176,6 +176,15 @@ def connect_and_listen(node_list, listen_duration=900): # listen up to 15 minute
                                         header = resp_payload[:BLOCK_HEADER_SIZE]
                                         version, prev_hash, merkle_root, timestamp, bits, nonce = struct.unpack('<I32s32sIII', header)
 
+                                        # Compute and verify block hash
+                                        computed_hash = hashlib.sha256(hashlib.sha256(header).digest()).digest()[::-1].hex()
+                                        if computed_hash == hash_hex:
+                                            print(f"✔ Verified block hash: {computed_hash}")
+                                        else:
+                                            print(f"✘ Block hash mismatch!")
+                                            print(f"Expected: {hash_hex}")
+                                            print(f"Computed: {computed_hash}")
+
                                         # Format timestamp
                                         from datetime import datetime, timezone
                                         block_time = datetime.fromtimestamp(timestamp, tz=timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
