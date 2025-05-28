@@ -30,7 +30,7 @@ This project is a simplified Bitcoin blockchain viewer that connects directly to
 Clone this repository and set up a virtual environment:
 
 ```bash
-git clone https://github.com/yourusername/bitcoin-viewer.git
+git clone https://github.com/Shawshank01/bitcoin-viewer.git
 cd bitcoin-viewer
 python3 -m venv venv
 source venv/bin/activate  # On Linux/macOS
